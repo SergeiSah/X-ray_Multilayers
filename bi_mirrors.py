@@ -7,17 +7,21 @@ import numpy as np
 class BiMirror:
 
     def __init__(self, absorber: Compound, spacer: Compound):
-        self.factors = absorber.factors.merge(spacer.factors, on='energy', how='outer',
-                                              suffixes=('_a', '_s')).sort_index().interpolate()
+        self.absorber = absorber.chem_formula
+        self.spacer = spacer.chem_formula
+
+        self.opt_consts = absorber.factors[['delta', 'beta']]\
+            .merge(spacer.factors[['delta', 'beta']], on='energy',
+                   how='outer', suffixes=('_a', '_s')).sort_index().interpolate()
 
         # intermediate settlements
-        self.__f = (self.factors.delta_a - self.factors.delta_s) / (self.factors.beta_a - self.factors.beta_s)
-        self.__g = self.factors.beta_s / (self.factors.beta_a - self.factors.beta_s)
+        self.__f = (self.opt_consts.delta_a - self.opt_consts.delta_s) / (self.opt_consts.beta_a - self.opt_consts.beta_s)
+        self.__g = self.opt_consts.beta_s / (self.opt_consts.beta_a - self.opt_consts.beta_s)
 
     def calc_optimal_gamma(self):
-        df = pd.DataFrame([0] * self.factors.shape[0], columns=['gamma'], index=self.factors.index)
+        df = pd.DataFrame([0] * self.opt_consts.shape[0], columns=['gamma'], index=self.opt_consts.index)
 
-        for i in range(self.factors.shape[0]):
+        for i in range(self.opt_consts.shape[0]):
             df.iloc[i] = fsolve(self._optimal_gamma, np.array([0.4999]), (self.__g.iloc[i],))
 
         # After absorption edges gamma becomes negative. All negative values (x) transformed to '1 + x'
@@ -26,12 +30,9 @@ class BiMirror:
         return df.gamma.astype(np.float64)
 
     def calc_max_reflection(self,
-                            polarization='circ',
-                            normal_angle=0,
-                            gamma=None,
-                            names=None) -> pd.DataFrame:
-
-        opt_constants = self.factors[['delta_a', 'beta_a', 'delta_s', 'beta_s']].copy()
+                            polarization: str = 'circ',
+                            normal_angle: float = .0,
+                            gamma: float = None) -> pd.Series:
 
         gamma = self.__process_gamma_input(gamma)
         s_pol = self._polarization_func('s', normal_angle)
@@ -41,24 +42,64 @@ class BiMirror:
         u_s = np.sqrt((1 - np.power(s_pol / y, 2)) / (1 + np.power(self.__f * s_pol / y, 2)))
         u_p = np.sqrt((1 - np.power(p_pol / y, 2)) / (1 + np.power(self.__f * p_pol / y, 2)))
 
-        r_s_max = (1 - u_s) / (1 + u_s)
-        r_p_max = (1 - u_p) / (1 + u_p)
-
         if polarization.lower() == 's':
-            opt_constants['R_S_max'] = r_s_max
+            r_s_max = (1 - u_s) / (1 + u_s)
+            r_s_max.name = 's-polarization'
+            return r_s_max
+
         elif polarization.lower() == 'p':
-            opt_constants['R_P_max'] = r_p_max
+            r_p_max = (1 - u_p) / (1 + u_p)
+            r_p_max.name = 'p-polarization'
+            return r_p_max
+
         elif polarization.lower() in ['c', 'circ', 'circular']:
-            opt_constants.loc[:, 'R_circ_max'] = (r_s_max + r_p_max) / 2
+            r_circ_max = 0.5 * ((1 - u_s) / (1 + u_s) + (1 - u_p) / (1 + u_p))
+            r_circ_max.name = 'circular-polarization'
+            return r_circ_max
+
         else:
-            opt_constants['R_S_max'] = r_s_max
-            opt_constants['R_P_max'] = r_p_max
-            opt_constants['R_circ_max'] = (r_s_max + r_p_max) / 2
+            raise ValueError('Wrong polarization. Must be "s", "p" or "circular".')
 
-        if names is not None:
-            opt_constants.columns = list(map(lambda k: k.replace('_a', f'_{names[0]}').replace('_s', f'_{names[1]}'), opt_constants.columns))
+    def calc_resolving_power(self,
+                             pol: str = 's',
+                             normal_angle: float = .0,
+                             gamma: float = None) -> pd.Series:
 
-        return opt_constants.iloc[:, 4:]
+        gamma = self.__process_gamma_input(gamma)
+        ang_rad = normal_angle / 180 * np.pi
+        pol = self._polarization_func(pol, normal_angle)
+
+        y = self.__calc_y(gamma)
+
+        c = 2 * np.sqrt(2) / 3 * np.pi
+        im_mu = gamma * self.opt_consts.beta_a + (1 - gamma) * self.opt_consts.beta_s
+
+        res_power = pd.Series(np.zeros(im_mu.shape[0]), index=im_mu.index, dtype=np.float64)
+        for i, en in enumerate(self.opt_consts.index.values):
+            xi = abs(self.__f.iloc[i] * pol) / y.iloc[i]
+            if xi >= 10:
+                res_power.iloc[i] = c / np.sin(np.pi * gamma.iloc[i]) * np.power(np.cos(ang_rad), 2) / \
+                                    abs(pol) / (self.opt_consts.loc[en, 'delta_a'] - self.opt_consts.loc[en, 'delta_s'])
+
+            else:
+                res_power.iloc[i] = np.power(np.cos(ang_rad), 2) / im_mu.iloc[i] / \
+                                     np.power((1 - np.power(pol / y.iloc[i], 2)) *
+                                              (1 + np.power(self.__f.iloc[i] * pol / y.iloc[i], 2)), 0.75)
+        return res_power
+
+    def calc_penetration_depth(self,
+                               normal_angle: float = .0,
+                               gamma: float = None) -> pd.Series:
+
+        gamma = self.__process_gamma_input(gamma)
+        s_pol = self._polarization_func('s', normal_angle)
+        y = self.__calc_y(gamma)
+
+        wavelengths = pd.Series(HC_CONST / self.opt_consts.index, index=self.opt_consts.index)
+        im_mu = gamma * self.opt_consts.beta_a + (1 - gamma) * self.opt_consts.beta_s
+
+        return wavelengths * np.cos(normal_angle) / np.pi / im_mu / np.sqrt(
+            (1 - np.power(s_pol / y, 2)) * (1 + np.power(self.__f * s_pol / y, 2)))
 
     @staticmethod
     def _optimal_gamma(gamma, g):
@@ -91,47 +132,15 @@ class BiMirror:
             raise TypeError(f'Wrong gamma. Must be float in the range [0, 1] or "optimal"')
         return gamma
 
-    def calculate_resolving_power(self,
-                                  polarization: str = 'circ',
-                                  normal_angle: float = .0,
-                                  gamma: float = None) -> pd.DataFrame:
+    def __repr__(self):
+        return f'{self.__class__.__name__}(absorber=Compound{self.absorber}, spacer=Compound{self.spacer})'
 
-        gamma = self.__process_gamma_input(gamma)
-        ang_rad = normal_angle / 180 * np.pi
-        polarization = self._polarization_func(polarization, normal_angle)
-
-        opt_constants = self.factors[['delta_a', 'beta_a', 'delta_s', 'beta_s']]
-        y = self.__calc_y(gamma)
-
-        c = 2 * np.sqrt(2) / 3 * np.pi
-        im_mu = gamma * opt_constants.beta_a + (1 - gamma) * opt_constants.beta_s
-
-        opt_constants['RP'] = pd.NA
-        for i, en in enumerate(opt_constants.index.values):
-            xi = abs(self.__f.iloc[i] * polarization) / y.iloc[i]
-            if xi >= 10:
-                opt_constants.iloc[i, 5] = c / np.sin(np.pi * opt_constants.loc[en, 'gamma']) * \
-                                           np.power(np.cos(ang_rad), 2) / abs(polarization) / \
-                                           (opt_constants.loc[en, 'delta_a'] - opt_constants.loc[en, 'delta_s'])
-            else:
-                opt_constants.iloc[i, 5] = np.power(np.cos(ang_rad), 2) / im_mu.iloc[i] / \
-                                     np.power((1 - np.power(polarization / y.iloc[i], 2)) *
-                                              (1 + np.power(self.__f.iloc[i] * polarization / y.iloc[i], 2)), 0.75)
-        return opt_constants['RP']
-
-    def calculate_penetration_depth(self, normal_angle: float, gamma: float = None) -> pd.DataFrame:
-        gamma = self.__process_gamma_input(gamma)
-        opt_constants = self.factors[['delta_a', 'beta_a', 'delta_s', 'beta_s']]
-        s_pol = self._polarization_func('s', normal_angle)
-        y = self.__calc_y(gamma)
-
-        wavelengths = pd.DataFrame(HC_CONST / opt_constants.index.values, columns=['wv']).set_index(opt_constants.index)
-        im_mu = gamma * opt_constants.beta_a + (1 - gamma) * opt_constants.beta_s
-
-        return wavelengths.wv * np.cos(normal_angle) / np.pi / im_mu / np.sqrt(
-            (1 - np.power(s_pol / y, 2)) * (1 + np.power(self.__f * s_pol / y, 2)))
+    def __str__(self):
+        return f'{self.absorber}/{self.spacer}'
 
 
 if __name__ == '__main__':
     mirror = BiMirror(Compound('Mo'), Compound('Be'))
     print(mirror.calc_max_reflection())
+    print(mirror.calc_penetration_depth())
+    print(mirror.calc_resolving_power())

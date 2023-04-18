@@ -167,8 +167,7 @@ class Compound:
             df.index.set_names('energy', inplace=True)
 
             # concatenate and interpolate
-            self.factors = pd.concat([self.factors, df], axis=0)
-            self.factors = self.factors.sort_values(by='energy').interpolate(method='index')
+            self.factors = pd.concat([self.factors, df], axis=0).sort_values(by='energy').interpolate(method='index')
 
     def __repr__(self):
         return f'Compound({self.chem_formula})'
