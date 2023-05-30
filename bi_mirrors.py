@@ -1,3 +1,23 @@
+"""
+https://doi.org/10.1007/BF02581074
+I.V. Kozhevnikov, A.V. Vinogradov, "Multilayer X-ray mirrors",
+Journal of Russian Laser Research, vol. 16, no. 4, 1995
+
+"BiMirror" is a class for calculating the reflectivity, resolving power, penetration depth
+of an X-ray mirror, comprised of two materials, using formulas from Kozhevnikov's work.
+
+Only Bragg peak with n=1 is considered.
+
+Definitions:
+l_a and l_b - thicknesses of layers;
+l = l_a + l_b - the structure period;
+N is number of pairs of layers (periods) in the structure;
+L = Nl - the structure thickness;
+gamma = l_a / l - the fraction of period occupied by the absorption layer;
+mu = gamma * epsilon_a + (1 - gamma) * epsilon_b - the permittivity averaged over the period;
+"""
+
+
 import pandas as pd
 from scipy.optimize import fsolve
 from compounds import Compound, HC_CONST
@@ -7,21 +27,18 @@ import numpy as np
 class BiMirror:
 
     def __init__(self, absorber: Compound, spacer: Compound):
-        self.absorber = absorber.chem_formula
-        self.spacer = spacer.chem_formula
-
-        self.opt_consts = absorber.factors[['delta', 'beta']]\
-            .merge(spacer.factors[['delta', 'beta']], on='energy',
-                   how='outer', suffixes=('_a', '_s')).sort_index().interpolate()
+        self.mirror = f'{absorber.chem_formula}/{spacer.chem_formula}'
+        self.permittivity = absorber.permittivity.join(spacer.permittivity, how='outer',
+                                                       lsuffix='_a', rsuffix='_s').interpolate()
 
         # intermediate settlements
-        self.__f = (self.opt_consts.delta_a - self.opt_consts.delta_s) / (self.opt_consts.beta_a - self.opt_consts.beta_s)
-        self.__g = self.opt_consts.beta_s / (self.opt_consts.beta_a - self.opt_consts.beta_s)
+        self.__f = (self.permittivity.e1_a - self.permittivity.e1_s) / (self.permittivity.e2_a - self.permittivity.e2_s)
+        self.__g = self.permittivity.e2_s / (self.permittivity.e2_a - self.permittivity.e2_s)
 
     def calc_optimal_gamma(self):
-        df = pd.DataFrame([0] * self.opt_consts.shape[0], columns=['gamma'], index=self.opt_consts.index)
+        df = pd.DataFrame([0] * self.permittivity.shape[0], columns=['gamma'], index=self.permittivity.index)
 
-        for i in range(self.opt_consts.shape[0]):
+        for i in range(self.permittivity.shape[0]):
             df.iloc[i] = fsolve(self._optimal_gamma, np.array([0.4999]), (self.__g.iloc[i],))
 
         # After absorption edges gamma becomes negative. All negative values (x) transformed to '1 + x'
@@ -58,8 +75,9 @@ class BiMirror:
             return r_circ_max
 
         else:
-            raise ValueError('Wrong polarization. Must be "s", "p" or "circular".')
+            raise ValueError('Wrong polarization. Must be "s", "p" or "circ".')
 
+    # FIXME
     def calc_resolving_power(self,
                              pol: str = 's',
                              normal_angle: float = .0,
@@ -72,14 +90,14 @@ class BiMirror:
         y = self.__calc_y(gamma)
 
         c = 2 * np.sqrt(2) / 3 * np.pi
-        im_mu = gamma * self.opt_consts.beta_a + (1 - gamma) * self.opt_consts.beta_s
+        im_mu = gamma * self.permittivity.e2_a + (1 - gamma) * self.permittivity.e2_s
 
         res_power = pd.Series(np.zeros(im_mu.shape[0]), index=im_mu.index, dtype=np.float64)
-        for i, en in enumerate(self.opt_consts.index.values):
+        for i, en in enumerate(self.permittivity.index.values):
             xi = abs(self.__f.iloc[i] * pol) / y.iloc[i]
             if xi >= 10:
                 res_power.iloc[i] = c / np.sin(np.pi * gamma.iloc[i]) * np.power(np.cos(ang_rad), 2) / \
-                                    abs(pol) / (self.opt_consts.loc[en, 'delta_a'] - self.opt_consts.loc[en, 'delta_s'])
+                                    abs(pol) / (self.permittivity.loc[en, 'e1_a'] - self.permittivity.loc[en, 'e1_s'])
 
             else:
                 res_power.iloc[i] = np.power(np.cos(ang_rad), 2) / im_mu.iloc[i] / \
@@ -95,11 +113,18 @@ class BiMirror:
         s_pol = self._polarization_func('s', normal_angle)
         y = self.__calc_y(gamma)
 
-        wavelengths = pd.Series(HC_CONST / self.opt_consts.index, index=self.opt_consts.index)
-        im_mu = gamma * self.opt_consts.beta_a + (1 - gamma) * self.opt_consts.beta_s
+        wavelengths = pd.Series(HC_CONST / self.permittivity.index, index=self.permittivity.index)
+        im_mu = gamma * self.permittivity.e2_a + (1 - gamma) * self.permittivity.e2_s
 
         return wavelengths * np.cos(normal_angle) / np.pi / im_mu / np.sqrt(
             (1 - np.power(s_pol / y, 2)) * (1 + np.power(self.__f * s_pol / y, 2)))
+
+    # TODO: complete this function
+    def calc_period_thickness(self,
+                              normal_angle: float = .0,
+                              gamma: float = None):
+
+        gamma = self.__process_gamma_input(gamma)
 
     @staticmethod
     def _optimal_gamma(gamma, g):
@@ -133,14 +158,13 @@ class BiMirror:
         return gamma
 
     def __repr__(self):
-        return f'{self.__class__.__name__}(absorber=Compound{self.absorber}, spacer=Compound{self.spacer})'
+        return f'{self.__class__.__name__}(absorber=Compound("{self.mirror.split("/")[0]}"), ' \
+               f'spacer=Compound("{self.mirror.split("/")[1]}"))'
 
     def __str__(self):
-        return f'{self.absorber}/{self.spacer}'
+        return f'{self.mirror}'
 
 
 if __name__ == '__main__':
-    mirror = BiMirror(Compound('Mo'), Compound('Be'))
-    print(mirror.calc_max_reflection())
-    print(mirror.calc_penetration_depth())
-    print(mirror.calc_resolving_power())
+    mo_be = BiMirror(Compound('Mo'), Compound('Be'))
+    print(mo_be.permittivity)
