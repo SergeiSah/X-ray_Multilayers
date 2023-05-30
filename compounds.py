@@ -95,15 +95,15 @@ class Compound:
                 print('Downloading from the Materials Project...')
                 self.__download_properties()
 
-        self.__get_factors()
+        self.__get_coefficients()
 
     @property
     def stoichiometry(self):
         return xdb.chemparse(self.chem_formula)
 
     @connect_to_db('Atomic_factors.db', table_name='Atomic_factors')
-    def __get_factors(self, connection, data):
-        factors = pd.DataFrame()
+    def __get_coefficients(self, connection, data):
+        cs = pd.DataFrame()  # dataframe for coefficients
 
         # get atomic scattering factors for each element and multiply it by stoichiometry
         for element, st in self.stoichiometry.items():
@@ -114,19 +114,27 @@ class Compound:
                 .select_from(data)\
                 .where(data.c.element == element)
 
-            factors = factors.join(pd.read_sql(query, connection, index_col='energy')
-                                   .rename(columns={'f1': f'f1_{element}', 'f2': f'f2_{element}'}) * st, how='outer')
+            cs = cs.join(pd.read_sql(query, connection, index_col='energy')
+                         .rename(columns={'f1': f'f1_{element}', 'f2': f'f2_{element}'}) * st, how='outer')
 
         # interpolate missing values
-        factors = factors.interpolate()
+        cs = cs.interpolate()
 
-        # calculate f1, f2, delta, beta coefficients and absorption coefficient 'mu'
-        factors['f1'] = factors.filter(like='f1').sum(axis=1)
-        factors['f2'] = factors.filter(like='f2').sum(axis=1)
-        p = 2.7008645E-6
-        factors['delta'] = p * self.density / self.molar_mass * np.power(HC_CONST / factors.index, 2) * factors.f1
-        factors['beta'] = p * self.density / self.molar_mass * np.power(HC_CONST / factors.index, 2) * factors.f2
-        self.factors = factors.iloc[:, -4:]
+        # calculate sum of factors of elements for compound
+        cs['f1'] = cs.filter(like='f1').sum(axis=1)
+        cs['f2'] = cs.filter(like='f2').sum(axis=1)
+
+        p = 2.7008645E-6  # n * r_0 / 2 / pi, r_0 - classical electron radius, n - number density of atoms
+        cs['delta'] = p * self.density / self.molar_mass * np.power(HC_CONST / cs.index, 2) * cs.f1
+        cs['beta'] = p * self.density / self.molar_mass * np.power(HC_CONST / cs.index, 2) * cs.f2
+
+        n = 1 - cs['delta']
+        cs['e1'] = np.power(n, 2) - np.power(cs['beta'], 2)
+        cs['e2'] = 2 * n * cs['beta']
+
+        self.factors = cs[['f1', 'f2']]
+        self.opt_consts = cs[['delta', 'beta']]
+        self.permittivity = cs[['e1', 'e2']]
 
     @connect_to_db('Compounds.db', table_name='Properties')
     def __get_properties(self, connection, data):
@@ -158,16 +166,16 @@ class Compound:
         return sum(Element(elem).at_weight * st for elem, st in self.stoichiometry.items())
 
     def add_energies(self, energies: list):
-        # exclude energies that are not in the factors
+        # exclude energies that are in the factors
         energies = [energy for energy in energies if energy not in self.factors.index]
 
         if energies:
-            # create new dataframe with givens energies
-            df = pd.DataFrame(np.nan, columns=['f1', 'f2', 'delta', 'beta'], index=energies)
-            df.index.set_names('energy', inplace=True)
+            for cs in [self.factors, self.opt_consts, self.permittivity]:
+                for energy in energies:
+                    cs.loc[energy, :] = np.nan
 
-            # concatenate and interpolate
-            self.factors = pd.concat([self.factors, df], axis=0).sort_values(by='energy').interpolate(method='index')
+                cs.sort_index(inplace=True)
+                cs.interpolate(method='index', inplace=True)
 
     def __repr__(self):
         return f'Compound({self.chem_formula})'
@@ -178,9 +186,8 @@ class Compound:
 
 if __name__ == '__main__':
     pd.options.display.max_columns = None
-    e = Compound('H2SO4')
+    e = Compound('Au')
     e.add_energies([1000])
-    print(e.density)
     print(e.factors.query('energy in (1000,)'))
-    # c = Element('Ac')
-    # print(c.Z, c.name)
+    print(e.opt_consts.query('energy in (1000,)'))
+    print(e.permittivity.query('energy in (1000,)'))
