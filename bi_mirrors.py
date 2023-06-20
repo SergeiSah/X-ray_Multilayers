@@ -29,17 +29,24 @@ class BiMirror:
         self.mirror = f'{absorber.chem_formula}/{spacer.chem_formula}'
         self.absorber = absorber
         self.spacer = spacer
-        self.permittivity = absorber.permittivity.join(spacer.permittivity, how='outer',
-                                                       lsuffix='_a', rsuffix='_s').interpolate('index')
 
         # intermediate settlements
-        self.__f = (self.permittivity.e1_a - self.permittivity.e1_s) / (self.permittivity.e2_a - self.permittivity.e2_s)
-        self.__g = self.permittivity.e2_s / (self.permittivity.e2_a - self.permittivity.e2_s)
+        self.__f = None
+        self.__g = None
+
+    @property
+    def permittivity(self):
+        epsilon = self.absorber.permittivity.join(self.spacer.permittivity, how='outer',
+                                                  lsuffix='_a', rsuffix='_s').interpolate('index')
+        self.__f = (epsilon.e1_a - epsilon.e1_s) / (epsilon.e2_a - epsilon.e2_s)
+        self.__g = epsilon.e2_s / (epsilon.e2_a - epsilon.e2_s)
+        return epsilon
 
     def calc_optimal_gamma(self):
-        df = pd.DataFrame([0] * self.permittivity.shape[0], columns=['gamma'], index=self.permittivity.index)
+        e = self.permittivity
+        df = pd.DataFrame([0] * e.shape[0], columns=['gamma'], index=e.index)
 
-        for i in range(self.permittivity.shape[0]):
+        for i in range(e.shape[0]):
             df.iloc[i] = fsolve(self._optimal_gamma, np.array([0.4999]), (self.__g.iloc[i],))
 
         # After absorption edges gamma becomes negative. All negative values (x) transformed to '1 + x'
@@ -80,48 +87,53 @@ class BiMirror:
             raise ValueError('Wrong polarization. Must be "s", "p" or "circ".')
 
     # FIXME
-    def calc_resolving_power(self,
-                             pol: str = 's',
-                             normal_angle: float = .0,
-                             gamma: float = None) -> pd.Series:
-
-        gamma = self.__process_gamma_input(gamma)
-        ang_rad = normal_angle / 180 * np.pi
-        pol = self._polarization_func(pol, normal_angle)
-
-        y = self.__calc_y(gamma)
-
-        c = 2 * np.sqrt(2) / 3 * np.pi
-        im_mu = gamma * self.permittivity.e2_a + (1 - gamma) * self.permittivity.e2_s
-
-        res_power = pd.Series(np.zeros(im_mu.shape[0]), index=im_mu.index, dtype=np.float64)
-        for i, en in enumerate(self.permittivity.index.values):
-            xi = abs(self.__f.iloc[i] * pol) / y.iloc[i]
-            if xi >= 10:
-                res_power.iloc[i] = c / np.sin(np.pi * gamma.iloc[i]) * np.power(np.cos(ang_rad), 2) / \
-                                    abs(pol) / (self.permittivity.loc[en, 'e1_a'] - self.permittivity.loc[en, 'e1_s'])
-
-            else:
-                res_power.iloc[i] = np.power(np.cos(ang_rad), 2) / im_mu.iloc[i] / \
-                                    np.power((1 - np.power(pol / y.iloc[i], 2)) *
-                                             (1 + np.power(self.__f.iloc[i] * pol / y.iloc[i], 2)), 0.75)
-        return res_power
+    # def calc_resolving_power(self,
+    #                          pol: str = 's',
+    #                          normal_angle: float = .0,
+    #                          gamma: float = None) -> pd.Series:
+    #
+    #     gamma = self.__process_gamma_input(gamma)
+    #     ang_rad = normal_angle / 180 * np.pi
+    #     pol = self._polarization_func(pol, normal_angle)
+    #
+    #     y = self.__calc_y(gamma)
+    #
+    #     c = 2 * np.sqrt(2) / 3 * np.pi
+    #     im_mu = gamma * self.permittivity.e2_a + (1 - gamma) * self.permittivity.e2_s
+    #
+    #     res_power = pd.Series(np.zeros(im_mu.shape[0]), index=im_mu.index, dtype=np.float64)
+    #     for i, en in enumerate(self.permittivity.index.values):
+    #         xi = abs(self.__f.iloc[i] * pol) / y.iloc[i]
+    #         if xi >= 10:
+    #             res_power.iloc[i] = c / np.sin(np.pi * gamma.iloc[i]) * np.power(np.cos(ang_rad), 2) / \
+    #                                 abs(pol) / (self.permittivity.loc[en, 'e1_a'] - self.permittivity.loc[en, 'e1_s'])
+    #
+    #         else:
+    #             res_power.iloc[i] = np.power(np.cos(ang_rad), 2) / im_mu.iloc[i] / \
+    #                                 np.power((1 - np.power(pol / y.iloc[i], 2)) *
+    #                                          (1 + np.power(self.__f.iloc[i] * pol / y.iloc[i], 2)), 0.75)
+    #     return res_power
 
     def calc_penetration_depth(self,
                                normal_angle: float = .0,
                                gamma: float = None) -> pd.Series:
 
+        e = self.permittivity
         gamma = self.__process_gamma_input(gamma)
         s_pol = self._polarization_func('s', normal_angle)
         y = self.__calc_y(gamma)
 
-        wavelengths = pd.Series(HC_CONST / self.permittivity.index, index=self.permittivity.index)
-        im_mu = gamma * self.permittivity.e2_a + (1 - gamma) * self.permittivity.e2_s
+        wavelengths = pd.Series(HC_CONST / e.index, index=e.index)
+        im_mu = gamma * e.e2_a + (1 - gamma) * e.e2_s
 
         return wavelengths * np.cos(normal_angle) / np.pi / im_mu / np.sqrt(
             (1 - np.power(s_pol / y, 2)) * (1 + np.power(self.__f * s_pol / y, 2)))
 
-    # TODO: complete this function
+    def calc_efficient_number_of_periods(self,
+                                         normal_angle: float = .0,
+                                         gamma: float = None):
+        return self.calc_penetration_depth(normal_angle, gamma) / self.calc_period_thickness(normal_angle, gamma)
+
     def calc_period_thickness(self,
                               normal_angle: float = .0,
                               gamma: float = None) -> pd.Series:
@@ -133,7 +145,7 @@ class BiMirror:
         delta_eff = delta_merged.delta_a * gamma + (1 - gamma) * delta_merged.delta_s
 
         return HC_CONST / self.permittivity.index / 2 / np.cos(ang_rad) * \
-               np.sqrt(1 - delta_eff / np.power(np.cos(ang_rad), 2))
+            np.sqrt(1 - delta_eff / np.power(np.cos(ang_rad), 2))
 
     @staticmethod
     def _optimal_gamma(gamma, g):
@@ -166,8 +178,8 @@ class BiMirror:
             raise TypeError(f'Wrong gamma. Must be float in the range [0, 1] or "optimal"')
         return gamma
 
-    def __getitem__(self, energy) -> pd.DataFrame:
-        return self.permittivity.loc[energy, :]
+    # def __getitem__(self, energy) -> pd.DataFrame:
+    #     return self.permittivity.loc[energy, :]
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}(absorber=Compound("{self.mirror.split("/")[0]}"), ' \
@@ -178,5 +190,5 @@ class BiMirror:
 
 
 if __name__ == '__main__':
-    mo_be = BiMirror(Compound('Cr'), Compound('Sc'))
-    print(mo_be.calc_optimal_gamma()[350:550])
+    mo_be = BiMirror(Compound('CrN'), Compound('Sc'))
+    print(mo_be.calc_efficient_number_of_periods()[350:400])
