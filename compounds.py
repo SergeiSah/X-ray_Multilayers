@@ -5,10 +5,13 @@ from typing import Union
 import xraydb as xdb
 from chemparse import parse_formula
 from sqlalchemy import MetaData, Table, create_engine, select
+from scipy.constants import pi, N_A, speed_of_light, physical_constants
 from mp_api.client import MPRester
 
 
-HC_CONST = 12398.41984  # planck_constant * light_speed [eV * A]
+r_e = physical_constants['classical electron radius'][0]
+Planck = physical_constants['Planck constant in eV/Hz'][0]
+HC_CONST = Planck * speed_of_light * 1e+10  # [eV * A]
 
 
 def connect_to_db(db_path: str, table_name: str):
@@ -32,11 +35,9 @@ class Element:
 
     def __init__(self, element: Union[str, int]):
         if isinstance(element, str):
-            self.name = element
-            self.Z = None
+            self.name, self.Z = element, None
         elif isinstance(element, int):
-            self.Z = element
-            self.name = None
+            self.name, self.Z = None, element
         else:
             raise TypeError('parameter "element" must be a name of an element or its atomic number')
 
@@ -77,7 +78,11 @@ class Element:
 class Compound:
     MAPI_KEY = os.environ.get('MAPI_KEY')
 
-    def __init__(self, chem_formula: str, is_download: bool = True):
+    @classmethod
+    def set_mapi_key(cls, key):
+        cls.MAPI_KEY = key
+
+    def __init__(self, chem_formula: str, download_from_mp: bool = True):
         if xdb.validate_formula(chem_formula):
             self.chem_formula = chem_formula
         else:
@@ -91,7 +96,7 @@ class Compound:
         except ValueError as msg:
             print(f'ValueError: {msg}')
 
-            if is_download:
+            if download_from_mp:
                 print('Downloading from the Materials Project...')
                 self.__download_properties()
 
@@ -118,13 +123,13 @@ class Compound:
                          .rename(columns={'f1': f'f1_{element}', 'f2': f'f2_{element}'}) * st, how='outer')
 
         # interpolate missing values
-        cs = cs.interpolate()
+        cs = cs.interpolate('index')
 
         # calculate sum of factors of elements for compound
         cs['f1'] = cs.filter(like='f1').sum(axis=1)
         cs['f2'] = cs.filter(like='f2').sum(axis=1)
 
-        p = 2.7008645E-6  # n * r_0 / 2 / pi, r_0 - classical electron radius, n - number density of atoms
+        p = N_A * r_e * 1e+10 / 2 / pi * 1e-24
         cs['delta'] = p * self.density / self.molar_mass * np.power(HC_CONST / cs.index, 2) * cs.f1
         cs['beta'] = p * self.density / self.molar_mass * np.power(HC_CONST / cs.index, 2) * cs.f2
 
@@ -186,7 +191,7 @@ class Compound:
 
 if __name__ == '__main__':
     pd.options.display.max_columns = None
-    e = Compound('Au')
+    e = Compound('B4C')
     e.add_energies([1000])
     print(e.factors.query('energy in (1000,)'))
     print(e.opt_consts.query('energy in (1000,)'))
