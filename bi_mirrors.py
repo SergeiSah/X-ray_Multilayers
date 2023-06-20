@@ -17,7 +17,6 @@ gamma = l_a / l - the fraction of period occupied by the absorption layer;
 mu = gamma * epsilon_a + (1 - gamma) * epsilon_b - the permittivity averaged over the period;
 """
 
-
 import pandas as pd
 from scipy.optimize import fsolve
 from compounds import Compound, HC_CONST
@@ -28,8 +27,10 @@ class BiMirror:
 
     def __init__(self, absorber: Compound, spacer: Compound):
         self.mirror = f'{absorber.chem_formula}/{spacer.chem_formula}'
+        self.absorber = absorber
+        self.spacer = spacer
         self.permittivity = absorber.permittivity.join(spacer.permittivity, how='outer',
-                                                       lsuffix='_a', rsuffix='_s').interpolate()
+                                                       lsuffix='_a', rsuffix='_s').interpolate('index')
 
         # intermediate settlements
         self.__f = (self.permittivity.e1_a - self.permittivity.e1_s) / (self.permittivity.e2_a - self.permittivity.e2_s)
@@ -42,6 +43,7 @@ class BiMirror:
             df.iloc[i] = fsolve(self._optimal_gamma, np.array([0.4999]), (self.__g.iloc[i],))
 
         # After absorption edges gamma becomes negative. All negative values (x) transformed to '1 + x'
+        # FIXME: this is not correct, but it works for now
         df[df.gamma < 0] = df[df.gamma < 0].apply(lambda x: 1 + x)
 
         return df.gamma.astype(np.float64)
@@ -101,8 +103,8 @@ class BiMirror:
 
             else:
                 res_power.iloc[i] = np.power(np.cos(ang_rad), 2) / im_mu.iloc[i] / \
-                                     np.power((1 - np.power(pol / y.iloc[i], 2)) *
-                                              (1 + np.power(self.__f.iloc[i] * pol / y.iloc[i], 2)), 0.75)
+                                    np.power((1 - np.power(pol / y.iloc[i], 2)) *
+                                             (1 + np.power(self.__f.iloc[i] * pol / y.iloc[i], 2)), 0.75)
         return res_power
 
     def calc_penetration_depth(self,
@@ -122,9 +124,16 @@ class BiMirror:
     # TODO: complete this function
     def calc_period_thickness(self,
                               normal_angle: float = .0,
-                              gamma: float = None):
-
+                              gamma: float = None) -> pd.Series:
+        ang_rad = normal_angle / 180 * np.pi
         gamma = self.__process_gamma_input(gamma)
+
+        delta_merged = self.absorber.opt_consts.join(self.spacer.opt_consts, how='outer',
+                                                     lsuffix='_a', rsuffix='_s').interpolate('index')
+        delta_eff = delta_merged.delta_a * gamma + (1 - gamma) * delta_merged.delta_s
+
+        return HC_CONST / self.permittivity.index / 2 / np.cos(ang_rad) * \
+               np.sqrt(1 - delta_eff / np.power(np.cos(ang_rad), 2))
 
     @staticmethod
     def _optimal_gamma(gamma, g):
@@ -157,14 +166,17 @@ class BiMirror:
             raise TypeError(f'Wrong gamma. Must be float in the range [0, 1] or "optimal"')
         return gamma
 
-    def __repr__(self):
+    def __getitem__(self, energy) -> pd.DataFrame:
+        return self.permittivity.loc[energy, :]
+
+    def __repr__(self) -> str:
         return f'{self.__class__.__name__}(absorber=Compound("{self.mirror.split("/")[0]}"), ' \
                f'spacer=Compound("{self.mirror.split("/")[1]}"))'
 
-    def __str__(self):
+    def __str__(self) -> str:
         return f'{self.mirror}'
 
 
 if __name__ == '__main__':
-    mo_be = BiMirror(Compound('Mo'), Compound('Be'))
-    print(mo_be.permittivity)
+    mo_be = BiMirror(Compound('Cr'), Compound('Sc'))
+    print(mo_be.calc_optimal_gamma()[350:550])
