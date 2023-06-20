@@ -90,6 +90,8 @@ class Compound:
 
         self.chem_name = None
         self.molar_mass = None
+        self.__density = None
+        self.__added_energies = []  # trace all added energies
 
         try:
             self.__get_properties()
@@ -100,11 +102,23 @@ class Compound:
                 print('Downloading from the Materials Project...')
                 self.__download_properties()
 
-        self.__get_coefficients()
+        # self.__get_coefficients()
 
     @property
     def stoichiometry(self):
         return xdb.chemparse(self.chem_formula)
+
+    @property
+    def density(self):
+        return self.__density
+
+    @density.setter
+    def density(self, val):
+        self.__density = val
+
+        # recalculate all coefficients and add all energies added earlier
+        self.__get_coefficients()
+        self.add_energies(self.__added_energies)
 
     @connect_to_db('Atomic_factors.db', table_name='Atomic_factors')
     def __get_coefficients(self, connection, data):
@@ -173,6 +187,7 @@ class Compound:
     def add_energies(self, energies: list):
         # exclude energies that are in the factors
         energies = [energy for energy in energies if energy not in self.factors.index]
+        self.__added_energies.extend(energies)
 
         if energies:
             for cs in [self.factors, self.opt_consts, self.permittivity]:
@@ -192,7 +207,9 @@ class Compound:
 if __name__ == '__main__':
     pd.options.display.max_columns = None
     e = Compound('B4C')
+    print(e.density)
     e.add_energies([1000])
-    print(e.factors.query('energy in (1000,)'))
     print(e.opt_consts.query('energy in (1000,)'))
-    print(e.permittivity.query('energy in (1000,)'))
+    e.density = 2.9
+    print(e.density)
+    print(e.opt_consts.query('energy in (1000,)'))
