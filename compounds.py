@@ -9,9 +9,9 @@ from scipy.constants import pi, N_A, speed_of_light, physical_constants
 from mp_api.client import MPRester
 
 
-r_e = physical_constants['classical electron radius'][0]
+r_e = physical_constants['classical electron radius'][0]    # [m]
 Planck = physical_constants['Planck constant in eV/Hz'][0]
-HC_CONST = Planck * speed_of_light * 1e+10  # [eV * A]
+HC_CONST = Planck * speed_of_light * 1e+10                  # [eV * A]
 
 
 def connect_to_db(db_path: str, table_name: str):
@@ -203,13 +203,3 @@ class Compound:
     def __str__(self):
         return self.chem_formula
 
-
-if __name__ == '__main__':
-    pd.options.display.max_columns = None
-    e = Compound('B4C')
-    print(e.density)
-    e.add_energies([1000])
-    print(e.opt_consts.query('energy in (1000,)'))
-    e.density = 2.9
-    print(e.density)
-    print(e.opt_consts.query('energy in (1000,)'))
