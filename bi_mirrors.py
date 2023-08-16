@@ -116,28 +116,36 @@ class BiMirror:
 
     def calc_penetration_depth(self,
                                normal_angle: float = .0,
-                               gamma: float = None) -> pd.Series:
+                               gamma: float = None,
+                               polarization: str = 's') -> pd.Series:
 
         e = self.permittivity
         gamma = self.__process_gamma_input(gamma)
-        s_pol = self._polarization_func('s', normal_angle)
+        ang_rad = np.deg2rad(normal_angle)
+        
+        s_pol = self._polarization_func(polarization, normal_angle)
         y = self.__calc_y(gamma)
 
         wavelengths = pd.Series(HC_CONST / e.index, index=e.index)
         im_mu = gamma * e.e2_a + (1 - gamma) * e.e2_s
-
-        return wavelengths * np.cos(normal_angle) / np.pi / im_mu / np.sqrt(
-            (1 - np.power(s_pol / y, 2)) * (1 + np.power(self.__f * s_pol / y, 2)))
+        
+        squared_part = np.sqrt((1 - np.power(s_pol / y, 2)) * (1 + np.power(self.__f * s_pol / y, 2)))
+        
+        # FIXME: determine different formulas for different conditions
+        return wavelengths * np.cos(ang_rad) / np.pi / im_mu / squared_part 
 
     def calc_efficient_number_of_periods(self,
                                          normal_angle: float = .0,
-                                         gamma: float = None):
-        return self.calc_penetration_depth(normal_angle, gamma) / self.calc_period_thickness(normal_angle, gamma)
+                                         gamma: float = None,
+                                         polarization: str = 's'):
+        
+        return self.calc_penetration_depth(normal_angle, gamma, polarization) / self.calc_period_thickness(normal_angle, gamma)
 
     def calc_period_thickness(self,
                               normal_angle: float = .0,
                               gamma: float = None) -> pd.Series:
-        ang_rad = normal_angle / 180 * np.pi
+        
+        ang_rad = np.deg2rad(normal_angle)
         gamma = self.__process_gamma_input(gamma)
 
         delta_merged = self.absorber.opt_consts.join(self.spacer.opt_consts, how='outer',
@@ -156,26 +164,26 @@ class BiMirror:
         if pol.lower() == 's':
             return 1.0
         elif pol.lower() == 'p':
-            ang_rad = angle / 180 * np.pi
+            ang_rad = np.deg2rad(angle)
             return np.cos(2 * ang_rad)
         else:
             raise TypeError('Wrong polarization type. Must be "s" or "p".')
 
     def __calc_y(self, gamma):
         return np.pi * (gamma + self.__g) / np.sin(np.pi * gamma)
-
+    
     def __process_gamma_input(self, gamma):
-        if gamma is None:
-            gamma = self.calc_optimal_gamma()
-        elif isinstance(gamma, str):
-            if gamma.lower() in ['o', 'opt', 'optimal']:
+        match gamma:
+            case None | 'o' | 'opt' | 'optimal':
                 gamma = self.calc_optimal_gamma()
-            else:
-                raise ValueError(f'Wrong gamma mode. Must be "o" or "opt" or "optimal"')
-        elif isinstance(gamma, float) and .0 <= gamma <= 1.0:
-            gamma = gamma
-        else:
-            raise TypeError(f'Wrong gamma. Must be float in the range [0, 1] or "optimal"')
+            case float(gamma):
+                if .0 <= gamma <= 1.0:
+                    gamma = pd.Series(gamma, index=self.permittivity.index)
+                else:
+                    raise ValueError(f'Wrong gamma value. Must be in the range [0, 1].')
+            case _:
+                raise ValueError(f'Wrong gamma. Must be float in the range [0, 1] or string "optimal"')
+                
         return gamma
 
     # def __getitem__(self, energy) -> pd.DataFrame:
@@ -187,8 +195,3 @@ class BiMirror:
 
     def __str__(self) -> str:
         return f'{self.mirror}'
-
-
-if __name__ == '__main__':
-    mo_be = BiMirror(Compound('CrN'), Compound('Sc'))
-    print(mo_be.calc_efficient_number_of_periods()[350:400])
