@@ -1,4 +1,5 @@
 import os
+from definitions import PACKAGES_DIR
 import pandas as pd
 import numpy as np
 from typing import Union
@@ -9,15 +10,14 @@ from scipy.constants import pi, N_A, speed_of_light, physical_constants
 from mp_api.client import MPRester
 
 
-r_e = physical_constants['classical electron radius'][0]    # [m]
-Planck = physical_constants['Planck constant in eV/Hz'][0]
-HC_CONST = Planck * speed_of_light * 1e+10                  # [eV * A]
-
+R_e = physical_constants['classical electron radius'][0]    # [m]
+PLANCK = physical_constants['Planck constant in eV/Hz'][0]
+HC_CONST = PLANCK * speed_of_light * 1e+10                  # [eV * A]
 
 def connect_to_db(db_path: str, table_name: str):
     def actual_decorator(func):
         meta = MetaData()
-        engine = create_engine(f'sqlite+pysqlite:///data_collections/{db_path}')
+        engine = create_engine(f'sqlite+pysqlite:///{PACKAGES_DIR}/data_collections/{db_path}')
         data = Table(table_name, meta, autoload_with=engine)
 
         def wrapper(*args, **kwargs):
@@ -143,9 +143,11 @@ class Compound:
         cs['f1'] = cs.filter(like='f1').sum(axis=1)
         cs['f2'] = cs.filter(like='f2').sum(axis=1)
 
-        p = N_A * r_e * 1e+10 / 2 / pi * 1e-24
-        cs['delta'] = p * self.density / self.molar_mass * np.power(HC_CONST / cs.index, 2) * cs.f1
-        cs['beta'] = p * self.density / self.molar_mass * np.power(HC_CONST / cs.index, 2) * cs.f2
+        p = N_A * R_e * 1e+10 / 2 / pi * 1e-24
+        wavelength = HC_CONST / cs.index
+        
+        cs['delta'] = p * self.density / self.molar_mass * np.power(wavelength, 2) * cs.f1
+        cs['beta'] = p * self.density / self.molar_mass * np.power(wavelength, 2) * cs.f2
 
         n = 1 - cs['delta']
         cs['e1'] = np.power(n, 2) - np.power(cs['beta'], 2)
@@ -154,6 +156,7 @@ class Compound:
         self.factors = cs[['f1', 'f2']]
         self.opt_consts = cs[['delta', 'beta']]
         self.permittivity = cs[['e1', 'e2']]
+        self.abs_coeff = 4 * np.pi * cs['beta'] / wavelength
 
     @connect_to_db('Compounds.db', table_name='Properties')
     def __get_properties(self, connection, data):
@@ -168,8 +171,12 @@ class Compound:
 
         self.molar_mass = props.mol_weight.values[0]
         self.chem_name = props.chem_name.values[0]
-        self.densities = props[['density', 'source_name', 'id']]
-        self.density = self.densities.density.values[0]
+        
+        if all(props.density.isna()):
+            raise ValueError('no density value for the compound in the database')
+        else:
+            self.densities = props[['density', 'source_name', 'id']]
+            self.density = self.densities[~self.densities.density.isna()].density.values[0]
 
     def __download_properties(self):
         with MPRester(self.MAPI_KEY) as mpr:
