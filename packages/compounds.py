@@ -8,11 +8,14 @@ from chemparse import parse_formula
 from sqlalchemy import MetaData, Table, create_engine, select
 from scipy.constants import pi, N_A, speed_of_light, physical_constants
 from mp_api.client import MPRester
+from warnings import warn
+import plotly.express as px
 
 
 R_e = physical_constants['classical electron radius'][0]    # [m]
 PLANCK = physical_constants['Planck constant in eV/Hz'][0]
-HC_CONST = PLANCK * speed_of_light * 1e+10                  # [eV * A]
+HC_CONST = PLANCK * speed_of_light * 1e+10                  # [eV * Å]
+
 
 def connect_to_db(db_path: str, table_name: str):
     def actual_decorator(func):
@@ -82,7 +85,7 @@ class Compound:
     def set_mapi_key(cls, key):
         cls.MAPI_KEY = key
 
-    def __init__(self, chem_formula: str, download_from_mp: bool = True):
+    def __init__(self, chem_formula: str, density: float = None, download_from_mp: bool = False):
         if xdb.validate_formula(chem_formula):
             self.chem_formula = chem_formula
         else:
@@ -90,7 +93,7 @@ class Compound:
 
         self.chem_name = None
         self.molar_mass = None
-        self.__density = None
+        self.__density = density
         self.__added_energies = []  # trace all added energies
 
         try:
@@ -106,7 +109,7 @@ class Compound:
 
     @property
     def stoichiometry(self):
-        return xdb.chemparse(self.chem_formula)
+        return parse_formula(self.chem_formula)
 
     @property
     def density(self):
@@ -173,10 +176,12 @@ class Compound:
         self.chem_name = props.chem_name.values[0]
         
         if all(props.density.isna()):
-            raise ValueError('no density value for the compound in the database')
+            warn('no density value for the compound in the database')
         else:
             self.densities = props[['density', 'source_name', 'id']]
-            self.density = self.densities[~self.densities.density.isna()].density.values[0]
+
+            if self.density is None:
+                self.density = self.densities[~self.densities.density.isna()].density.values[0]
 
     def __download_properties(self):
         with MPRester(self.MAPI_KEY) as mpr:
@@ -209,4 +214,131 @@ class Compound:
 
     def __str__(self):
         return self.chem_formula
+
+
+class OptConstPlotter:
+
+    def __init__(self, *materials: str):
+        self.__downloaded_materials = []
+        
+        self.__delta = pd.DataFrame()
+        self.__beta  = pd.DataFrame()
+        self.__abs_coeff = pd.DataFrame()
+        
+        self.add_materials(*materials)
+        
+        self.image = {
+            'width': 1000,
+            'height': 600,
+            'template': 'seaborn',
+            'font': {'size': 20, 'family': 'Work Sans'}
+        }
+        
+        self.coeff_en_plot = {
+            'plot_bgcolor': '#EFF5F5',
+            'gridcolor': '#D6E4E5'
+        }
+
+    @property
+    def delta(self):
+        return self.__delta
+
+    @property
+    def beta(self):
+        return self.__beta
+    
+    @property
+    def abs_coeff(self):
+        return self.__abs_coeff
+
+    def add_materials(self, *materials: str):
+        for material in materials:
+            if material not in self.__downloaded_materials:
+                self.__downloaded_materials.append(material)
+                comp = Compound(material)
+
+                delta = comp.opt_consts[['delta']]
+                delta.columns = [material]
+
+                beta = comp.opt_consts[['beta']]
+                beta.columns = [material]
+                
+                abs_coeff = comp.abs_coeff.to_frame()
+                abs_coeff.columns = [material]
+                
+                self.__delta = pd.concat([self.delta, delta], axis=1)
+                self.__beta  = pd.concat([self.beta, beta], axis=1)
+                self.__abs_coeff = pd.concat([self.abs_coeff, abs_coeff], axis=1)
+
+        self.__delta.interpolate(method='index', inplace=True)
+        self.__beta.interpolate(method='index', inplace=True)
+        self.__abs_coeff.interpolate(method='index', inplace=True)
+
+    def add_energies(self, energies: list):
+        not_in_index = [en for en in energies if en not in self.__delta.index]
+
+        if not_in_index:
+            for const in [self.__delta, self.__beta, self.__abs_coeff]:
+
+                for energy in energies:
+                    const.loc[energy, :] = np.nan
+
+                const.sort_index(inplace=True)
+                const.interpolate(method='index', inplace=True)
+
+    def plot_opt_consts(self, materials: list[str], energy: float, x: str = 'n') -> None:
+        """
+        materials: list 
+            list of materials
+        energy: float
+            energy in eV
+        x: str (default: 'n')
+            x axis "delta" or "n"
+        """
+        
+        self.add_materials(*materials)
+        self.add_energies([energy])
+
+        beta_n = pd.concat([self.delta.loc[energy, materials].to_frame().T, self.beta.loc[energy, materials].to_frame().T])
+        beta_n.index = ['delta', 'beta']
+        beta_n = beta_n.T.reset_index().rename(columns={'index': 'material'})
+        beta_n['n'] = 1 - beta_n['delta']
+
+        fig = px.scatter(beta_n, x=x, y='beta', text='material')
+        
+        fig.update_traces(textposition='top center', marker=dict(size=15, color='Green', line=dict(width=2, color='DarkSlateGrey')))
+        fig.add_annotation(text=f'Energy = {energy} eV', showarrow=False, bgcolor='orange', xref='paper', yref='paper', x=1, y=1,
+                           font=dict(color='DarkSlateGrey', size=24), borderpad=10)
+        
+        fig.update_layout(self.image)
+        fig.update_yaxes(title_text=r'$\beta$')
+        fig.update_xaxes(title_text='Re(n)' if x == 'n' else '$\delta$')
+        
+        fig.show()
+        
+    def plot_abs_coeff(self, materials: list[str], en_range: list[float], xdtick=20, log_y=True) -> None:
+        
+        self.add_materials(*materials)
+        self.add_energies(en_range)
+        
+        abs_coeffs = self.abs_coeff.loc[en_range[0]:en_range[-1], materials] * 1e+8  # convert from A^-1 to cm^-1
+        
+        fig = px.line(abs_coeffs, range_x=en_range, log_y=log_y, color_discrete_sequence=px.colors.qualitative.Prism)
+        fig.update_layout(
+            self.image,
+            plot_bgcolor=self.coeff_en_plot['plot_bgcolor'],
+            legend_title_text='Material',
+        )
+        
+        fig.update_xaxes(
+            title='Energy (eV)', dtick=xdtick, mirror=True, showline=True, linecolor='black', 
+            linewidth=2, gridwidth=1.5, ticks='outside', gridcolor=self.coeff_en_plot['gridcolor'],
+        )
+
+        fig.update_yaxes(
+            title='Absorbtion coefficient (A<sup>-1</sup>)', exponentformat='power', mirror=True, showline=True,
+            linecolor='black', linewidth=2, gridwidth=1.5, gridcolor=self.coeff_en_plot['gridcolor'], ticks='outside', zeroline=False
+        )
+        
+        fig.show()
 
