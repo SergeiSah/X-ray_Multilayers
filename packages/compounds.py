@@ -170,7 +170,7 @@ class Compound:
         props = all_props[all_props['formula'].apply(parse_formula) == self.stoichiometry].reset_index(drop=True)
 
         if props.empty:
-            raise ValueError('no such compound in the database')
+            raise ValueError(f'no such compound {self.chem_formula} in the database')
 
         self.molar_mass = props.mol_weight.values[0]
         self.chem_name = props.chem_name.values[0]
@@ -210,7 +210,7 @@ class Compound:
                 cs.interpolate(method='index', inplace=True)
 
     def __repr__(self):
-        return f'Compound({self.chem_formula})'
+        return f'Compound(chem_formula={self.chem_formula}, density={self.density})'
 
     def __str__(self):
         return self.chem_formula
@@ -234,9 +234,20 @@ class OptConstPlotter:
             'font': {'size': 20, 'family': 'Work Sans'}
         }
         
-        self.coeff_en_plot = {
+        self.backgrkound = {
             'plot_bgcolor': '#EFF5F5',
-            'gridcolor': '#D6E4E5'
+        }
+        
+        self.grid = {
+            'gridcolor': '#D6E4E5',
+            'gridwidth': 1.5
+        }
+        
+        self.borders = {
+            'mirror': True, 
+            'showline': True, 
+            'linecolor': 'black', 
+            'linewidth': 2
         }
 
     @property
@@ -270,9 +281,9 @@ class OptConstPlotter:
                 self.__beta  = pd.concat([self.beta, beta], axis=1)
                 self.__abs_coeff = pd.concat([self.abs_coeff, abs_coeff], axis=1)
 
-        self.__delta.interpolate(method='index', inplace=True)
-        self.__beta.interpolate(method='index', inplace=True)
-        self.__abs_coeff.interpolate(method='index', inplace=True)
+        self.__delta = self.__delta.sort_index().interpolate(method='index').dropna()
+        self.__beta = self.__beta.sort_index().interpolate(method='index').dropna()
+        self.__abs_coeff = self.__abs_coeff.sort_index().interpolate(method='index').dropna()
 
     def add_energies(self, energies: list):
         not_in_index = [en for en in energies if en not in self.__delta.index]
@@ -306,13 +317,14 @@ class OptConstPlotter:
 
         fig = px.scatter(beta_n, x=x, y='beta', text='material')
         
-        fig.update_traces(textposition='top center', marker=dict(size=15, color='Green', line=dict(width=2, color='DarkSlateGrey')))
-        fig.add_annotation(text=f'Energy = {energy} eV', showarrow=False, bgcolor='orange', xref='paper', yref='paper', x=1, y=1,
-                           font=dict(color='DarkSlateGrey', size=24), borderpad=10)
+        fig.update_traces(textposition='top center', marker=dict(size=15, color='Green',
+                                                                 line=dict(width=2, color='DarkSlateGrey')))
+        fig.add_annotation(text=f'Energy = {energy} eV', showarrow=False, bgcolor='orange', xref='paper', yref='paper',
+                           x=1, y=1, font=dict(color='DarkSlateGrey', size=24), borderpad=10)
         
-        fig.update_layout(self.image)
-        fig.update_yaxes(title_text=r'$\beta$')
-        fig.update_xaxes(title_text='Re(n)' if x == 'n' else '$\delta$')
+        fig.update_layout(**self.image, **self.backgrkound)
+        fig.update_yaxes(**self.borders, **self.grid, title_text=r'Absorption index', zeroline=False)
+        fig.update_xaxes(**self.borders, **self.grid, title_text='Re(n)' if x == 'n' else 'Refraction index decrement')
         
         fig.show()
         
@@ -324,21 +336,37 @@ class OptConstPlotter:
         abs_coeffs = self.abs_coeff.loc[en_range[0]:en_range[-1], materials] * 1e+8  # convert from A^-1 to cm^-1
         
         fig = px.line(abs_coeffs, range_x=en_range, log_y=log_y, color_discrete_sequence=px.colors.qualitative.Prism)
-        fig.update_layout(
-            self.image,
-            plot_bgcolor=self.coeff_en_plot['plot_bgcolor'],
-            legend_title_text='Material',
-        )
         
-        fig.update_xaxes(
-            title='Energy (eV)', dtick=xdtick, mirror=True, showline=True, linecolor='black', 
-            linewidth=2, gridwidth=1.5, ticks='outside', gridcolor=self.coeff_en_plot['gridcolor'],
-        )
+        fig.update_layout(**self.image, **self.backgrkound, legend_title_text='Material')
+        fig.update_xaxes(**self.borders, **self.grid, title='Energy (eV)', dtick=xdtick, ticks='outside')
+        fig.update_yaxes(**self.borders, **self.grid, title='Absorbtion coefficient (A<sup>-1</sup>)',
+                         exponentformat='power', ticks='outside', zeroline=False)
+        
+        fig.show()
+        
+    def plot_delta_beta_ratio(self, spacer: str, absorbers: list[str], energy: float) -> None:
+        self.add_materials(*absorbers, spacer)
+        self.add_energies([energy])
+        
+        delta_absorb = self.delta.loc[energy, absorbers]
+        delta_spacer = self.delta.loc[energy, spacer]
 
-        fig.update_yaxes(
-            title='Absorbtion coefficient (A<sup>-1</sup>)', exponentformat='power', mirror=True, showline=True,
-            linecolor='black', linewidth=2, gridwidth=1.5, gridcolor=self.coeff_en_plot['gridcolor'], ticks='outside', zeroline=False
-        )
+        beta_absorb = self.beta.loc[energy, absorbers]
+        beta_spacer = self.beta.loc[energy, spacer]
+
+        ratios = (abs(delta_absorb - delta_spacer) / (beta_absorb - beta_spacer)).sort_values(ascending=False)
         
+        fig = px.bar(ratios, color_discrete_sequence=px.colors.qualitative.Set2)
+        fig.update_layout(**self.image, **self.backgrkound, showlegend=False)
+        fig.update_layout(width=800)
+
+        fig.add_annotation(text=f'Spacer: {spacer}', showarrow=False, bgcolor='orange', xref='paper', yref='paper',
+                           x=1, y=0.95, font=dict(color='DarkSlateGrey', size=24), borderpad=10)
+
+        fig.update_traces(width=0.7)
+        fig.update_yaxes(**self.grid, **self.borders, zeroline=False, ticks='outside',
+                         title='|δ<sub>a</sub> - δ<sub>s</sub>| / (β<sub>a</sub> - β<sub>s</sub>)')
+        fig.update_xaxes(**self.grid, **self.borders, title='Absorber')
+
         fig.show()
 
