@@ -18,17 +18,19 @@ mu = gamma * epsilon_a + (1 - gamma) * epsilon_b - the permittivity averaged ove
 """
 
 import pandas as pd
-from scipy.optimize import fsolve
-from compounds import Compound, HC_CONST
 import numpy as np
+from scipy.optimize import fsolve
+from typing import Union
+from compounds import Compound, HC_CONST
 
 
 class BiMirror:
 
-    def __init__(self, absorber: Compound, spacer: Compound):
-        self.mirror = f'{absorber.chem_formula}/{spacer.chem_formula}'
-        self.absorber = absorber
-        self.spacer = spacer
+    def __init__(self, absorber: Compound | str, spacer: Compound | str):
+        self.absorber = absorber if isinstance(absorber, Compound) else Compound(absorber)
+        self.spacer = spacer if isinstance(spacer, Compound) else Compound(spacer)
+
+        self.mirror = f'{self.absorber.chem_formula}/{self.spacer.chem_formula}'
 
         # intermediate settlements
         self.__f = None
@@ -151,9 +153,28 @@ class BiMirror:
         delta_merged = self.absorber.opt_consts.join(self.spacer.opt_consts, how='outer',
                                                      lsuffix='_a', rsuffix='_s').interpolate('index')
         delta_eff = delta_merged.delta_a * gamma + (1 - gamma) * delta_merged.delta_s
+        wavelength = HC_CONST / delta_eff.index
 
-        return HC_CONST / self.permittivity.index / 2 / np.cos(ang_rad) * \
-            np.sqrt(1 - delta_eff / np.power(np.cos(ang_rad), 2))
+        return wavelength / 2 / np.cos(ang_rad) / np.sqrt(1 - 2 * delta_eff / np.power(np.cos(ang_rad), 2))
+
+    def calc_normal_angle(self,
+                          period: float,
+                          gamma: float = None) -> pd.Series:
+        """
+        :param period: float, period of the mirror in Å
+        :param gamma: float in (0, 1) range, ratio of absorber thickness to the period
+        :return: pd.Series, Bragg's angles for given energies and period of the mirror
+        """
+
+        gamma = self.__process_gamma_input(gamma)
+
+        delta_merged = self.absorber.opt_consts.join(self.spacer.opt_consts, how='outer',
+                                                     lsuffix='_a', rsuffix='_s').interpolate('index')
+        delta_eff = delta_merged.delta_a * gamma + (1 - gamma) * delta_merged.delta_s
+        wavelength = HC_CONST / delta_eff.index
+
+        return np.rad2deg(np.arccos(np.sqrt(np.power(wavelength, 2)
+                                            + 8 * np.power(period, 2) * delta_eff) / 2 / period))
 
     @staticmethod
     def _optimal_gamma(gamma, g):
@@ -195,3 +216,47 @@ class BiMirror:
 
     def __str__(self) -> str:
         return f'{self.mirror}'
+    
+    
+class BiMirrorsPlotter:
+    
+    def __init__(self, *bi_mirrors: str) -> None:
+        self.__bi_mirrors = {f'{a}/{b}': BiMirror(Compound(a), Compound(b))
+                             for a, b in [m.split('/') for m in bi_mirrors]}
+
+        self.__reflectivity = pd.DataFrame()
+        self.__eff_number_of_periods = pd.DataFrame()
+        self.__gammas = {}
+        
+    def add_bi_mirrors(self, *bi_mirrors: str) -> None:
+        for bi_mirror in bi_mirrors:
+            if bi_mirror not in self.__bi_mirrors:
+                absorber, spacer = bi_mirror.split('/')
+                self.__bi_mirrors[bi_mirror] = BiMirror(Compound(absorber), Compound(spacer))
+
+    def calc_r_max(self,
+                   bi_mirrors: list[str],
+                   gammas: list[float] | str = 'opt',
+                   en_range: tuple[float, float] | None = None) -> pd.DataFrame:
+
+        reflectivity = pd.DataFrame()
+
+        if gammas == 'opt':
+            gammas = ['opt'] * len(bi_mirrors)
+
+        for bi_mirror, gamma in zip(bi_mirrors, gammas):
+            if bi_mirror in self.__bi_mirrors:
+                if bi_mirror in self.__gammas:
+                    reflectivity = pd.concat([reflectivity, self.__reflectivity[bi_mirror]], axis=1)
+                    continue
+
+            self.__gammas[bi_mirror] = gamma
+            self.__reflectivity[bi_mirror] = self.__bi_mirrors[bi_mirror].calc_max_reflection(gamma=gamma)
+
+        return reflectivity.sort_index().interpolate('index')
+
+    def plot_r_max(self,
+                   bi_mirrors: list[str],
+                   gammas: list[float] | str = 'opt',
+                   en_range: tuple[float, float] | None = None) -> None:
+        pass
