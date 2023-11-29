@@ -1,0 +1,9 @@
+pandas~=2.0.3
+numpy~=1.25.2
+xraydb~=4.5.1
+plotly~=5.9.0
+chemparse~=0.1.2
+sqlalchemy~=1.4.39
+scipy~=1.11.1
+requests~=2.31.0
+beautifulsoup4~=4.12.2
