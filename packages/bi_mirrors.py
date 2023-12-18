@@ -22,6 +22,7 @@ import numpy as np
 from scipy.optimize import fsolve
 from typing import Union
 from compounds import Compound, HC_CONST
+import plotly.express as px
 
 
 class BiMirror:
@@ -59,7 +60,7 @@ class BiMirror:
 
     def calc_max_reflection(self,
                             polarization: str = 'circ',
-                            normal_angle: float = .0,
+                            normal_angle: pd.Series | float = .0,
                             gamma: float = None) -> pd.Series:
 
         gamma = self.__process_gamma_input(gamma)
@@ -220,43 +221,87 @@ class BiMirror:
     
 class BiMirrorsPlotter:
     
-    def __init__(self, *bi_mirrors: str) -> None:
-        self.__bi_mirrors = {f'{a}/{b}': BiMirror(Compound(a), Compound(b))
-                             for a, b in [m.split('/') for m in bi_mirrors]}
-
-        self.__reflectivity = pd.DataFrame()
-        self.__eff_number_of_periods = pd.DataFrame()
-        self.__gammas = {}
+    def __init__(self) -> None:
+        self.image = {
+            'width': 1000,
+            'height': 600,
+            'template': 'seaborn',
+            'font': {'size': 20, 'family': 'Work Sans'}
+        }
         
-    def add_bi_mirrors(self, *bi_mirrors: str) -> None:
-        for bi_mirror in bi_mirrors:
-            if bi_mirror not in self.__bi_mirrors:
-                absorber, spacer = bi_mirror.split('/')
-                self.__bi_mirrors[bi_mirror] = BiMirror(Compound(absorber), Compound(spacer))
+        self.background = {
+            'plot_bgcolor': '#EFF5F5',
+        }
+        
+        self.grid = {
+            'gridcolor': '#D6E4E5',
+            'gridwidth': 1.5
+        }
+        
+        self.borders = {
+            'mirror': True, 
+            'showline': True, 
+            'linecolor': 'black', 
+            'linewidth': 2
+        }
 
-    def calc_r_max(self,
+    def plot_param(self,
                    bi_mirrors: list[str],
+                   periods: list[float],
                    gammas: list[float] | str = 'opt',
-                   en_range: tuple[float, float] | None = None) -> pd.DataFrame:
+                   param: str = 'r_max',
+                   legend: str = 'mirror',
+                   en_range: tuple[float, float] | None = None,
+                   x_scale: str = 'eV') -> None:
 
-        reflectivity = pd.DataFrame()
+        mirror_param = pd.DataFrame()
+        y_title = {
+            'r_max': 'Peak reflectivity',
+            'opt_gamma': 'Optimal γ=d<sub>a</sub>/d',
+            'n_eff': 'Effective number of periods'
+        }
+        
+        # calculate desired parameter
+        for bi_mirror, period, gamma in zip(bi_mirrors, periods, gammas):
+            absorber, spacer = bi_mirror.split('/')
+            mirror = BiMirror(absorber, spacer)
+            
+            if param == 'opt_gamma':
+                m_param = mirror.calc_optimal_gamma()
+            elif param == 'r_max':
+                angles = mirror.calc_normal_angle(period, gamma)
+                m_param = mirror.calc_max_reflection(normal_angle=angles, gamma=gamma)
+            elif param == 'n_eff':
+                m_param = mirror.calc_efficient_number_of_periods(gamma=gamma)
+            else:
+                raise ValueError(f'Wrong param. Must be "opt_gamma", "r_max" or "n_eff".')
 
-        if gammas == 'opt':
-            gammas = ['opt'] * len(bi_mirrors)
+            mirror_param = pd.concat([mirror_param, m_param], axis=1)
+        
+        if legend == 'mirror':
+            cols = bi_mirrors
+        elif legend == 'period':
+            cols = [f'{period / 10} nm' for period in periods]
+        elif legend == 'gamma':
+            cols = gammas
+        else:
+            raise ValueError(f'Wrong legend. Must be "mirror", "period" or "gamma"')
+        
+        mirror_param.columns = cols
+        mirror_param = mirror_param.sort_index().interpolate('index').dropna().loc[en_range[0]:en_range[1]]
+        
+        if x_scale == 'keV':
+            mirror_param.index /= 1000
+        
+        fig = px.line(mirror_param, color_discrete_sequence=px.colors.qualitative.Prism)
+        
+        fig.update_layout(**self.image, **self.background, legend_title_text=legend.title())
+        fig.update_xaxes(**self.borders, **self.grid, title=f'Energy ({x_scale})', ticks='outside')
+        fig.update_yaxes(**self.borders, **self.grid, title=y_title[param], ticks='outside', zeroline=False)
+        
+        fig.show()
 
-        for bi_mirror, gamma in zip(bi_mirrors, gammas):
-            if bi_mirror in self.__bi_mirrors:
-                if bi_mirror in self.__gammas:
-                    reflectivity = pd.concat([reflectivity, self.__reflectivity[bi_mirror]], axis=1)
-                    continue
+        
 
-            self.__gammas[bi_mirror] = gamma
-            self.__reflectivity[bi_mirror] = self.__bi_mirrors[bi_mirror].calc_max_reflection(gamma=gamma)
 
-        return reflectivity.sort_index().interpolate('index')
 
-    def plot_r_max(self,
-                   bi_mirrors: list[str],
-                   gammas: list[float] | str = 'opt',
-                   en_range: tuple[float, float] | None = None) -> None:
-        pass
