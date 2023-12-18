@@ -79,13 +79,7 @@ class Element:
 
 
 class Compound:
-    MAPI_KEY = os.environ.get('MAPI_KEY')
-
-    @classmethod
-    def set_mapi_key(cls, key):
-        cls.MAPI_KEY = key
-
-    def __init__(self, chem_formula: str, density: float = None, download_from_mp: bool = False):
+    def __init__(self, chem_formula: str, density: float = None):
         if xdb.validate_formula(chem_formula):
             self.chem_formula = chem_formula
         else:
@@ -94,18 +88,14 @@ class Compound:
         self.chem_name = None
         self.molar_mass = None
         self.__density = density
+        
+        self.densities = pd.DataFrame(columns=['density', 'source_name', 'id'])
         self.__added_energies = []  # trace all added energies
-
-        try:
-            self.__get_properties()
-        except ValueError as msg:
-            print(f'ValueError: {msg}')
-
-            if download_from_mp:
-                print('Downloading from the Materials Project...')
-                self.__download_properties()
-
-        # self.__get_coefficients()
+        
+        if density is not None:
+            self.densities.loc[1] = [density, 'manual', None]
+        
+        self.__get_properties()
 
     @property
     def stoichiometry(self):
@@ -178,20 +168,10 @@ class Compound:
         if all(props.density.isna()):
             warn('no density value for the compound in the database')
         else:
-            self.densities = props[['density', 'source_name', 'id']]
+            self.densities = pd.concat([self.densities, props[['density', 'source_name', 'id']]]).reset_index(drop=True)
 
             if self.density is None:
                 self.density = self.densities[~self.densities.density.isna()].density.values[0]
-
-    def __download_properties(self):
-        with MPRester(self.MAPI_KEY) as mpr:
-            results = min(mpr.summary.search(formula=[self.chem_formula]), key=lambda x: x.formation_energy_per_atom)
-
-        self.molar_mass = self.__calculate_molar_mass()
-        self.densities = pd.DataFrame({'density': [results.density],
-                                       'source_name': ['Materials Project'],
-                                       'id': [results.material_id]})
-        self.density = self.densities.density.values[0]
 
     def __calculate_molar_mass(self):
         return sum(Element(elem).at_weight * st for elem, st in self.stoichiometry.items())
@@ -339,7 +319,7 @@ class OptConstPlotter:
         
         fig.update_layout(**self.image, **self.backgrkound, legend_title_text='Material')
         fig.update_xaxes(**self.borders, **self.grid, title='Energy (eV)', dtick=xdtick, ticks='outside')
-        fig.update_yaxes(**self.borders, **self.grid, title='Absorbtion coefficient (A<sup>-1</sup>)',
+        fig.update_yaxes(**self.borders, **self.grid, title='Absorbtion coefficient (cm<sup>-1</sup>)',
                          exponentformat='power', ticks='outside', zeroline=False)
         
         fig.show()
@@ -365,7 +345,7 @@ class OptConstPlotter:
 
         fig.update_traces(width=0.7)
         fig.update_yaxes(**self.grid, **self.borders, zeroline=False, ticks='outside',
-                         title='|δ<sub>a</sub> - δ<sub>s</sub>| / (β<sub>a</sub> - β<sub>s</sub>)')
+                         title='(δ<sub>a</sub> - δ<sub>s</sub>) / (β<sub>a</sub> - β<sub>s</sub>)')
         fig.update_xaxes(**self.grid, **self.borders, title='Absorber')
 
         fig.show()
