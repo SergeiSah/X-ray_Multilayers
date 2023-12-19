@@ -1,15 +1,11 @@
-import os
 from definitions import PACKAGES_DIR
 import pandas as pd
 import numpy as np
-from typing import Union
 import xraydb as xdb
 from chemparse import parse_formula
 from sqlalchemy import MetaData, Table, create_engine, select
 from scipy.constants import pi, N_A, speed_of_light, physical_constants
-from mp_api.client import MPRester
 from warnings import warn
-import plotly.express as px
 
 
 R_e = physical_constants['classical electron radius'][0]    # [m]
@@ -93,23 +89,18 @@ class Compound:
         self.densities = pd.DataFrame(columns=['density', 'source_name', 'id'])
         self.__added_energies = []  # trace all added energies
         
-        if density is not None:
-            self.__molar_mass = self.__calculate_molar_mass()
-            self.density = density
-            self.densities.loc[1] = [density, 'manual', None]
-        else:
-            self.__get_properties()
+        self.__get_properties(density)
 
     @property
-    def stoichiometry(self):
+    def stoichiometry(self) -> dict[str, float]:
         return parse_formula(self.chem_formula)
 
     @property
-    def density(self):
+    def density(self) -> float:
         return self.__density
 
     @density.setter
-    def density(self, val):
+    def density(self, val: float) -> None:
         self.__density = val
 
         # recalculate all coefficients and add all energies added earlier
@@ -117,7 +108,7 @@ class Compound:
         self.add_energies(self.__added_energies)
 
     @connect_to_db('Atomic_factors.db', table_name='Atomic_factors')
-    def __get_coefficients(self, connection, data):
+    def __get_coefficients(self, connection, data) -> None:
         cs = pd.DataFrame()  # dataframe for coefficients
 
         # get atomic scattering factors for each element and multiply it by stoichiometry
@@ -155,34 +146,43 @@ class Compound:
         self.abs_coeff = 4 * np.pi * cs['beta'] / wavelength
 
     @connect_to_db('Compounds.db', table_name='Properties')
-    def __get_properties(self, connection, data):
+    def __load_properties(self, connection, data) -> pd.DataFrame:
+        # get data from the database
         query = select('*').select_from(data)
         all_props = pd.DataFrame(connection.execute(query).fetchall(),
                                  columns=['formula', 'chem_name', 'density', 'mol_weight', 'source_name', 'id'])
 
         props = all_props[all_props['formula'].apply(parse_formula) == self.stoichiometry].reset_index(drop=True)
 
-        if props.empty and self.density is None:
+        return props
+
+    def __get_properties(self, density: float = None) -> None:
+        props = self.__load_properties()
+
+        if props.empty and density is None:
             raise ValueError(f'no such compound {self.chem_formula} in the database')
 
-        self.__molar_mass = props.mol_weight.values[0]
-        self.chem_name = props.chem_name.values[0]
-        
-        if all(props.density.isna()) and self.density is None:
-            warn('no density value for the compound in the database')
+        if props.empty:
+            self.__molar_mass = self.__calculate_molar_mass()
+            self.densities = pd.DataFrame(columns=['density', 'source_name', 'id'])
         else:
-            self.densities = pd.concat([self.densities, props[['density', 'source_name', 'id']]]).reset_index(drop=True)
+            self.__molar_mass = props.mol_weight.values[0]
+            self.chem_name = props.chem_name.values[0]
+            self.densities = props[['density', 'source_name', 'id']]
+        
+        if all(props.density.isna()) and density is None:
+            raise ValueError('no density value for the compound in the database')
+        elif density is None:
+            self.density = self.densities[~self.densities.density.isna()].density.values[0]
+        else:
+            self.density = density
+            manual_density = pd.DataFrame([[self.density, 'manual', None]], columns=['density', 'source_name', 'id'])
+            self.densities = pd.concat([manual_density, self.densities]).reset_index(drop=True)
 
-            if self.density is None:
-                self.density = self.densities[~self.densities.density.isna()].density.values[0]
-            # else:
-            #     # run calculation of the coefficients
-            #     self.density = self.density
-
-    def __calculate_molar_mass(self):
+    def __calculate_molar_mass(self) -> float:
         return sum(Element(elem).at_weight * st for elem, st in self.stoichiometry.items())
 
-    def add_energies(self, energies: list):
+    def add_energies(self, energies: list) -> None:
         # exclude energies that are in the factors
         energies = [energy for energy in energies if energy not in self.factors.index]
         self.__added_energies.extend(energies)
@@ -201,8 +201,3 @@ class Compound:
     def __str__(self):
         return self.chem_formula
 
-
-if __name__ == '__main__':
-    comp = Compound('MoSiCP', 5)
-
-    print(comp.densities)
