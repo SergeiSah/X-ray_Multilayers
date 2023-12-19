@@ -36,13 +36,14 @@ def connect_to_db(db_path: str, table_name: str):
 
 class Element:
 
-    def __init__(self, element: Union[str, int]):
-        if isinstance(element, str):
-            self.name, self.Z = element, None
-        elif isinstance(element, int):
-            self.name, self.Z = None, element
-        else:
-            raise TypeError('parameter "element" must be a name of an element or its atomic number')
+    def __init__(self, element: str | int):
+        match element:
+            case str():
+                self.name, self.Z = element, None
+            case int():
+                self.name, self.Z = None, element
+            case _:
+                raise TypeError('parameter "element" must be a name of an element or its atomic number')
 
         self.__get_properties()
 
@@ -86,16 +87,18 @@ class Compound:
             raise ValueError('Invalid chemical formula')
 
         self.chem_name = None
-        self.molar_mass = None
-        self.__density = density
+        self.__molar_mass = None
+        self.__density = None
         
         self.densities = pd.DataFrame(columns=['density', 'source_name', 'id'])
         self.__added_energies = []  # trace all added energies
         
         if density is not None:
+            self.__molar_mass = self.__calculate_molar_mass()
+            self.density = density
             self.densities.loc[1] = [density, 'manual', None]
-        
-        self.__get_properties()
+        else:
+            self.__get_properties()
 
     @property
     def stoichiometry(self):
@@ -139,8 +142,8 @@ class Compound:
         p = N_A * R_e * 1e+10 / 2 / pi * 1e-24
         wavelength = HC_CONST / cs.index
         
-        cs['delta'] = p * self.density / self.molar_mass * np.power(wavelength, 2) * cs.f1
-        cs['beta'] = p * self.density / self.molar_mass * np.power(wavelength, 2) * cs.f2
+        cs['delta'] = p * self.density / self.__molar_mass * np.power(wavelength, 2) * cs.f1
+        cs['beta'] = p * self.density / self.__molar_mass * np.power(wavelength, 2) * cs.f2
 
         n = 1 - cs['delta']
         cs['e1'] = np.power(n, 2) - np.power(cs['beta'], 2)
@@ -159,19 +162,22 @@ class Compound:
 
         props = all_props[all_props['formula'].apply(parse_formula) == self.stoichiometry].reset_index(drop=True)
 
-        if props.empty:
+        if props.empty and self.density is None:
             raise ValueError(f'no such compound {self.chem_formula} in the database')
 
-        self.molar_mass = props.mol_weight.values[0]
+        self.__molar_mass = props.mol_weight.values[0]
         self.chem_name = props.chem_name.values[0]
         
-        if all(props.density.isna()):
+        if all(props.density.isna()) and self.density is None:
             warn('no density value for the compound in the database')
         else:
             self.densities = pd.concat([self.densities, props[['density', 'source_name', 'id']]]).reset_index(drop=True)
 
             if self.density is None:
                 self.density = self.densities[~self.densities.density.isna()].density.values[0]
+            # else:
+            #     # run calculation of the coefficients
+            #     self.density = self.density
 
     def __calculate_molar_mass(self):
         return sum(Element(elem).at_weight * st for elem, st in self.stoichiometry.items())
@@ -196,157 +202,7 @@ class Compound:
         return self.chem_formula
 
 
-class OptConstPlotter:
+if __name__ == '__main__':
+    comp = Compound('MoSiCP', 5)
 
-    def __init__(self, *materials: str):
-        self.__downloaded_materials = []
-        
-        self.__delta = pd.DataFrame()
-        self.__beta  = pd.DataFrame()
-        self.__abs_coeff = pd.DataFrame()
-        
-        self.add_materials(*materials)
-        
-        self.image = {
-            'width': 1000,
-            'height': 600,
-            'template': 'seaborn',
-            'font': {'size': 20, 'family': 'Work Sans'}
-        }
-        
-        self.backgrkound = {
-            'plot_bgcolor': '#EFF5F5',
-        }
-        
-        self.grid = {
-            'gridcolor': '#D6E4E5',
-            'gridwidth': 1.5
-        }
-        
-        self.borders = {
-            'mirror': True, 
-            'showline': True, 
-            'linecolor': 'black', 
-            'linewidth': 2
-        }
-
-    @property
-    def delta(self):
-        return self.__delta
-
-    @property
-    def beta(self):
-        return self.__beta
-    
-    @property
-    def abs_coeff(self):
-        return self.__abs_coeff
-
-    def add_materials(self, *materials: str):
-        for material in materials:
-            if material not in self.__downloaded_materials:
-                self.__downloaded_materials.append(material)
-                comp = Compound(material)
-
-                delta = comp.opt_consts[['delta']]
-                delta.columns = [material]
-
-                beta = comp.opt_consts[['beta']]
-                beta.columns = [material]
-                
-                abs_coeff = comp.abs_coeff.to_frame()
-                abs_coeff.columns = [material]
-                
-                self.__delta = pd.concat([self.delta, delta], axis=1)
-                self.__beta  = pd.concat([self.beta, beta], axis=1)
-                self.__abs_coeff = pd.concat([self.abs_coeff, abs_coeff], axis=1)
-
-        self.__delta = self.__delta.sort_index().interpolate(method='index').dropna()
-        self.__beta = self.__beta.sort_index().interpolate(method='index').dropna()
-        self.__abs_coeff = self.__abs_coeff.sort_index().interpolate(method='index').dropna()
-
-    def add_energies(self, energies: list):
-        not_in_index = [en for en in energies if en not in self.__delta.index]
-
-        if not_in_index:
-            for const in [self.__delta, self.__beta, self.__abs_coeff]:
-
-                for energy in energies:
-                    const.loc[energy, :] = np.nan
-
-                const.sort_index(inplace=True)
-                const.interpolate(method='index', inplace=True)
-
-    def plot_opt_consts(self, materials: list[str], energy: float, x: str = 'n') -> None:
-        """
-        materials: list 
-            list of materials
-        energy: float
-            energy in eV
-        x: str (default: 'n')
-            x axis "delta" or "n"
-        """
-        
-        self.add_materials(*materials)
-        self.add_energies([energy])
-
-        beta_n = pd.concat([self.delta.loc[energy, materials].to_frame().T, self.beta.loc[energy, materials].to_frame().T])
-        beta_n.index = ['delta', 'beta']
-        beta_n = beta_n.T.reset_index().rename(columns={'index': 'material'})
-        beta_n['n'] = 1 - beta_n['delta']
-
-        fig = px.scatter(beta_n, x=x, y='beta', text='material')
-        
-        fig.update_traces(textposition='top center', marker=dict(size=15, color='Green',
-                                                                 line=dict(width=2, color='DarkSlateGrey')))
-        fig.add_annotation(text=f'Energy = {energy} eV', showarrow=False, bgcolor='orange', xref='paper', yref='paper',
-                           x=1, y=1, font=dict(color='DarkSlateGrey', size=24), borderpad=10)
-        
-        fig.update_layout(**self.image, **self.backgrkound)
-        fig.update_yaxes(**self.borders, **self.grid, title_text=r'Absorption index', zeroline=False)
-        fig.update_xaxes(**self.borders, **self.grid, title_text='Re(n)' if x == 'n' else 'Refraction index decrement')
-        
-        fig.show()
-        
-    def plot_abs_coeff(self, materials: list[str], en_range: list[float], xdtick=20, log_y=True) -> None:
-        
-        self.add_materials(*materials)
-        self.add_energies(en_range)
-        
-        abs_coeffs = self.abs_coeff.loc[en_range[0]:en_range[-1], materials] * 1e+8  # convert from A^-1 to cm^-1
-        
-        fig = px.line(abs_coeffs, range_x=en_range, log_y=log_y, color_discrete_sequence=px.colors.qualitative.Prism)
-        
-        fig.update_layout(**self.image, **self.backgrkound, legend_title_text='Material')
-        fig.update_xaxes(**self.borders, **self.grid, title='Energy (eV)', dtick=xdtick, ticks='outside')
-        fig.update_yaxes(**self.borders, **self.grid, title='Absorbtion coefficient (cm<sup>-1</sup>)',
-                         exponentformat='power', ticks='outside', zeroline=False)
-        
-        fig.show()
-        
-    def plot_delta_beta_ratio(self, spacer: str, absorbers: list[str], energy: float) -> None:
-        self.add_materials(*absorbers, spacer)
-        self.add_energies([energy])
-        
-        delta_absorb = self.delta.loc[energy, absorbers]
-        delta_spacer = self.delta.loc[energy, spacer]
-
-        beta_absorb = self.beta.loc[energy, absorbers]
-        beta_spacer = self.beta.loc[energy, spacer]
-
-        ratios = (abs(delta_absorb - delta_spacer) / (beta_absorb - beta_spacer)).sort_values(ascending=False)
-        
-        fig = px.bar(ratios, color_discrete_sequence=px.colors.qualitative.Set2)
-        fig.update_layout(**self.image, **self.backgrkound, showlegend=False)
-        fig.update_layout(width=800)
-
-        fig.add_annotation(text=f'Spacer: {spacer}', showarrow=False, bgcolor='orange', xref='paper', yref='paper',
-                           x=1, y=0.95, font=dict(color='DarkSlateGrey', size=24), borderpad=10)
-
-        fig.update_traces(width=0.7)
-        fig.update_yaxes(**self.grid, **self.borders, zeroline=False, ticks='outside',
-                         title='(δ<sub>a</sub> - δ<sub>s</sub>) / (β<sub>a</sub> - β<sub>s</sub>)')
-        fig.update_xaxes(**self.grid, **self.borders, title='Absorber')
-
-        fig.show()
-
+    print(comp.densities)
