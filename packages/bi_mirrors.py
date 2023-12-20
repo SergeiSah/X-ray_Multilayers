@@ -20,22 +20,36 @@ mu = gamma * epsilon_a + (1 - gamma) * epsilon_b - the permittivity averaged ove
 import pandas as pd
 import numpy as np
 from scipy.optimize import fsolve
-from typing import Union
 from compounds import Compound, HC_CONST
-import plotly.express as px
 
 
 class BiMirror:
 
-    def __init__(self, absorber: Compound | str, spacer: Compound | str):
-        self.absorber = absorber if isinstance(absorber, Compound) else Compound(absorber)
-        self.spacer = spacer if isinstance(spacer, Compound) else Compound(spacer)
+    def __init__(self,
+                 absorber: Compound | str | tuple[str, float] | list[str, float],
+                 spacer: Compound | str | tuple[str, float] | list[str, float]):
 
+        self.absorber = self.validate_compound(absorber)
+        self.spacer = self.validate_compound(spacer)
         self.mirror = f'{self.absorber.chem_formula}/{self.spacer.chem_formula}'
 
         # intermediate settlements
         self.__f = None
         self.__g = None
+
+    @staticmethod
+    def validate_compound(input_compound: Compound | str | tuple[str, float] | list[str, float]) -> Compound:
+        match input_compound:
+            case Compound():
+                pass
+            case str():
+                input_compound = Compound(input_compound)
+            case tuple() | list():
+                input_compound = Compound(*input_compound)
+            case _:
+                raise TypeError('parameter "input_compound" must be a name of a compound')
+
+        return input_compound
 
     @property
     def permittivity(self):
