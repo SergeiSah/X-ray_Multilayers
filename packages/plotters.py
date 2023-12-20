@@ -1,7 +1,9 @@
 import pandas as pd
 import numpy as np
 import plotly.express as px
+
 from compounds import Compound
+from bi_mirrors import BiMirror
 
 
 class OptConstPlotter:
@@ -174,4 +176,88 @@ class OptConstPlotter:
 
         fig.show()
 
+
+class BiMirrorsPlotter:
+
+    def __init__(self) -> None:
+        self.image = {
+            'width': 1000,
+            'height': 600,
+            'template': 'seaborn',
+            'font': {'size': 20, 'family': 'Work Sans'}
+        }
+
+        self.background = {
+            'plot_bgcolor': '#EFF5F5',
+        }
+
+        self.grid = {
+            'gridcolor': '#D6E4E5',
+            'gridwidth': 1.5
+        }
+
+        self.borders = {
+            'mirror': True,
+            'showline': True,
+            'linecolor': 'black',
+            'linewidth': 2
+        }
+
+    def plot_param(self,
+                   bi_mirrors: list[str],
+                   periods: list[float],
+                   gammas: list[float] | str = 'opt',
+                   param: str = 'r_max',
+                   legend: str = 'mirror',
+                   en_range: tuple[float, float] | None = None,
+                   x_scale: str = 'eV') -> None:
+
+        mirror_param = pd.DataFrame()
+        y_title = {
+            'r_max': 'Peak reflectivity',
+            'opt_gamma': 'Optimal γ=d<sub>a</sub>/d',
+            'n_eff': 'Effective number of periods'
+        }
+
+        # calculate desired parameter
+        for bi_mirror, period, gamma in zip(bi_mirrors, periods, gammas):
+            absorber, spacer = bi_mirror.split('/')
+            mirror = BiMirror(absorber, spacer)
+
+            match param:
+                case 'opt_gamma':
+                    m_param = mirror.calc_optimal_gamma()
+                case 'r_max':
+                    angles = mirror.calc_normal_angle(period, gamma)
+                    m_param = mirror.calc_max_reflection(normal_angle=angles, gamma=gamma)
+                case 'n_eff':
+                    m_param = mirror.calc_efficient_number_of_periods(gamma=gamma)
+                case _:
+                    raise ValueError(f'Wrong param. Must be "opt_gamma", "r_max" or "n_eff".')
+
+            mirror_param = pd.concat([mirror_param, m_param], axis=1)
+
+        match legend:
+            case 'mirror':
+                cols = bi_mirrors
+            case 'period':
+                cols = [f'{period / 10} nm' for period in periods]
+            case 'gamma':
+                cols = gammas
+            case _:
+                raise ValueError(f'Wrong legend. Must be "mirror", "period" or "gamma"')
+
+        mirror_param.columns = cols
+        mirror_param = mirror_param.sort_index().interpolate('index').dropna().loc[en_range[0]:en_range[1]]
+
+        if x_scale == 'keV':
+            mirror_param.index /= 1000
+
+        fig = px.line(mirror_param, color_discrete_sequence=px.colors.qualitative.Prism)
+
+        fig.update_layout(**self.image, **self.background, legend_title_text=legend.title())
+        fig.update_xaxes(**self.borders, **self.grid, title=f'Energy ({x_scale})', ticks='outside')
+        fig.update_yaxes(**self.borders, **self.grid, title=y_title[param], ticks='outside', zeroline=False)
+
+        fig.show()
 
